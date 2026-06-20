@@ -39,6 +39,8 @@ if not st.session_state.logged_in:
                 if user:
                     st.session_state.logged_in = True
                     st.session_state.user_info = user
+                    st.session_state.consumed_calories = get_calories_for_today(user['user_id'])
+                    st.session_state.calories_initialized = user['user_id']
                     st.success(f"Welcome back, {user['name']}!")
                     st.rerun()
                 else:
@@ -67,10 +69,8 @@ if not st.session_state.logged_in:
 else:
     user = st.session_state.user_info
     
-    # Initialize today's calories from DB if not already initialized for this session
-    if "calories_initialized" not in st.session_state or st.session_state.calories_initialized != user['user_id']:
-        st.session_state.consumed_calories = get_calories_for_today(user['user_id'])
-        st.session_state.calories_initialized = user['user_id']
+    # Force reload fresh calorie summary data from cloud ledger frames on loop execution
+    st.session_state.consumed_calories = get_calories_for_today(user['user_id'])
     
     # Header bar layout matrix
     header_left, header_mid, header_right = st.columns([3, 1, 1])
@@ -78,21 +78,23 @@ else:
         st.title(f"🍳 {user['name']}'s SmartShelf Workspace")
         st.caption(f"Dietary Restriction Filter Active: **{user['dietary_preference']}**")
     with header_mid:
-        if st.button("Sign Out of Grid", width='stretch'):
+        if st.button("Sign Out of Grid", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.user_info = None
             st.session_state.consumed_calories = 0.0
+            st.session_state.ai_recipe = None
             if "calories_initialized" in st.session_state:
                 del st.session_state.calories_initialized
             st.rerun()
     with header_right:
-        if st.button("🗑️ Delete Account", width='stretch', type="secondary"):
+        if st.button("🗑️ Delete Account", use_container_width=True, type="secondary"):
             with st.spinner("Purging infrastructure record frames..."):
                 success = delete_user_account(user['user_id'])
                 if success:
                     st.session_state.logged_in = False
                     st.session_state.user_info = None
                     st.session_state.consumed_calories = 0.0
+                    st.session_state.ai_recipe = None
                     if "calories_initialized" in st.session_state:
                         del st.session_state.calories_initialized
                     st.toast("Your account profile has been wiped cleanly.")
@@ -108,93 +110,69 @@ else:
         calorie_target = st.slider("🎯 Set Daily Calorie Target (kcal)", min_value=1200, max_value=4000, value=2000, step=50)
     
     with gym_col2:
-        st.write("Log / Edit Calories:")
-        new_cal = st.number_input(
-            "Consumed Calories (kcal)", 
-            min_value=0.0, 
-            value=float(st.session_state.consumed_calories), 
-            step=50.0
-        )
-        if new_cal != st.session_state.consumed_calories:
-            diff = new_cal - st.session_state.consumed_calories
-            st.session_state.consumed_calories = new_cal
-            add_meal_log(user['user_id'], diff, "Manual Adjustment")
-            st.rerun()
-            
-        with st.popover("🍔 Quick Log Outside Meal", use_container_width=True):
+        st.write("Quick Log Logbook Metrics:")
+        
+        with st.popover("🍔 Quick Log Meal", use_container_width=True):
             quick_food = st.text_input("What did you eat? (e.g. Pizza slice)").strip()
-            manual_cal = st.number_input("Calories (kcal, optional if estimating)", min_value=0, value=0, step=50)
+            manual_cal = st.number_input("Calories (kcal)", min_value=0, value=0, step=50)
             
             col_log_manual, col_log_auto = st.columns(2)
             with col_log_manual:
                 if st.button("Log Manually", use_container_width=True):
                     if quick_food and manual_cal > 0:
                         add_meal_log(user['user_id'], float(manual_cal), quick_food)
-                        st.session_state.consumed_calories += manual_cal
                         st.toast(f"Logged {quick_food} ({manual_cal} kcal)!")
                         st.rerun()
             with col_log_auto:
-                if st.button("Auto-Estimate & Log", type="primary", use_container_width=True):
+                if st.button("Auto-Estimate", type="primary", use_container_width=True):
                     if quick_food:
                         with st.spinner("AI estimating calories..."):
                             estimated_cal = estimate_meal_calories(quick_food)
                             add_meal_log(user['user_id'], estimated_cal, quick_food)
-                            st.session_state.consumed_calories += estimated_cal
-                            st.toast(f"AI Estimated & Logged: {quick_food} (~{int(estimated_cal)} kcal)!")
+                            st.toast(f"AI Logged: {quick_food} (~{int(estimated_cal)} kcal)!")
                             st.rerun()
             
     with gym_col3:
         remaining_cal = calorie_target - st.session_state.consumed_calories
         st.metric(
             label="Current Daily Intake Progress Balance", 
-            value=f"{st.session_state.consumed_calories} / {calorie_target} kcal",
-            delta=f"{remaining_cal} kcal remaining" if remaining_cal >= 0 else f"{abs(remaining_cal)} kcal OVER LIMIT",
+            value=f"{int(st.session_state.consumed_calories)} / {calorie_target} kcal",
+            delta=f"{int(remaining_cal)} kcal remaining" if remaining_cal >= 0 else f"{int(abs(remaining_cal))} kcal OVER LIMIT",
             delta_color="normal" if remaining_cal >= 0 else "inverse"
         )
         
     # 🚨 AUDIO ALARM TRIGGER CHANNEL
     if st.session_state.consumed_calories > calorie_target:
-        st.error(f"⚠️ **CRITICAL ALARM: OVER-CALORIE ACCUMULATION DETECTED!** You have exceeded your fitness threshold boundary by {abs(remaining_cal)} kcal. Consider balancing with a gym workout!")
+        st.error(f"⚠️ **CRITICAL ALARM: OVER-CALORIE ACCUMULATION DETECTED!** You have exceeded your fitness threshold boundary by {int(abs(remaining_cal))} kcal. Consider balancing with a gym workout!")
         
-        # 🔊 INJECTING WEB AUDIO SYNTHESIZER BEEP SOUND EFFECT
         sound_html = """
         <script>
         function playAlarmSound() {
             var context = new (window.AudioContext || window.webkitAudioContext)();
+            var osc1 = context.createOscillator();
+            var gain1 = context.createGain();
+            osc1.type = 'sine';
+            osc1.frequency.value = 523.25;
+            gain1.gain.setValueAtTime(0.2, context.currentTime);
+            osc1.connect(gain1);
+            gain1.connect(context.destination);
             
-            // Generate a solid warning beep tone using oscillators
-            var oscillator = context.createOscillator();
-            var gainNode = context.createGain();
+            var osc2 = context.createOscillator();
+            var gain2 = context.createGain();
+            osc2.type = 'sine';
+            osc2.frequency.value = 659.25;
+            gain2.gain.setValueAtTime(0.2, context.currentTime);
+            osc2.connect(gain2);
+            gain2.connect(context.destination);
             
-            oscillator.type = 'sawtooth'; // Distinct, clean buzz tone
-            oscillator.frequency.value = 523.25; // High C note pitch frequency
-            
-            gainNode.gain.setValueAtTime(0.3, context.currentTime); // Control volume output comfort
-            
-            oscillator.connect(gainNode);
-            gainNode.connect(context.destination);
-            
-            // Ring a double pulse beep sequence
-            oscillator.start();
-            setTimeout(function() { oscillator.stop(); }, 250); // Beep 1 length
-            
-            setTimeout(function() {
-                var osc2 = context.createOscillator();
-                var gain2 = context.createGain();
-                osc2.type = 'sawtooth';
-                osc2.frequency.value = 523.25;
-                gain2.gain.setValueAtTime(0.3, context.currentTime);
-                osc2.connect(gain2);
-                gain2.connect(context.destination);
-                osc2.start();
-                setTimeout(function() { osc2.stop(); }, 250); // Beep 2 length
-            }, 400);
+            osc1.start();
+            osc1.stop(context.currentTime + 0.15);
+            osc2.start(context.currentTime + 0.12);
+            osc2.stop(context.currentTime + 0.35);
         }
-        // Force execution immediately as the block mounts into view
         playAlarmSound();
         </script>
         """
-        # Execute the hidden browser macro components seamlessly
         st.components.v1.html(sound_html, height=0, width=0)
         
     # Daily Meal Logs (Today) Section
@@ -211,16 +189,14 @@ else:
             })
         st.dataframe(meals_display, use_container_width=True)
         
-        with st.expander("🗑️ Delete/Remove Today's Meal Entry"):
+        with st.expand_as_sidebar if False else st.expander("🗑️ Remove Today's Meal Entry"):
             del_options = {
                 f"{row['logged_at'].strftime('%I:%M %p')} - {row['food_item']} ({int(row['calories'])} kcal)": row['log_id']
                 for row in daily_meals
             }
             selected_del = st.selectbox("Select meal log to delete", list(del_options.keys()))
-            if st.button("Delete Meal Log", type="primary", use_container_width=True):
-                log_id_to_delete = del_options[selected_del]
-                if delete_meal_log(log_id_to_delete):
-                    st.session_state.consumed_calories = get_calories_for_today(user['user_id'])
+            if st.button("Delete Selected Meal Log", type="primary", use_container_width=True):
+                if delete_meal_log(del_options[selected_del]):
                     st.toast("Deleted meal log entry!")
                     st.rerun()
     else:
@@ -269,14 +245,14 @@ else:
         uploaded_image = st.file_uploader("Upload Fridge/Shelf Image Asset", type=["jpg", "jpeg", "png"])
         
         if uploaded_image is not None:
-            st.image(uploaded_image, caption="Uploaded Shelf Matrix Source", width='stretch')
+            st.image(uploaded_image, caption="Uploaded Shelf Matrix Source", use_container_width=True)
             
-            if st.button("Run Automated AI Vision Extraction", width='stretch', type="secondary"):
+            if st.button("Run Automated AI Vision Extraction", use_container_width=True, type="secondary"):
                 with st.spinner("Processing image properties via Vision Core matrices..."):
                     detected_assets = analyze_shelf_image(uploaded_image)
 
                     if not detected_assets:
-                        st.error("No items were detected in the image. Try a clearer shelf photo with visible food items.")
+                        st.error("No items were detected in the image. Try another clear photo.")
                     else:
                         inserted = 0
                         for asset in detected_assets:
@@ -290,7 +266,7 @@ else:
                             if success:
                                 inserted += 1
 
-                        st.success(f"🤖 Vision scan complete! Inserted {inserted} detected item(s) into inventory.")
+                        st.success(f"🤖 Vision scan complete! Inserted {inserted} item(s) into database.")
                         if inserted:
                             st.session_state.ai_recipe = None
                             st.rerun()
@@ -307,7 +283,7 @@ else:
             with row_col2:
                 m_life = st.slider("Expected Shelf Life Boundaries (Days)", min_value=1, max_value=30, value=7)
             
-            submit_manual = st.form_submit_button("Log Item into PostgreSQL Engine", width='stretch')
+            submit_manual = st.form_submit_button("Log Item into PostgreSQL Engine", use_container_width=True)
             
             if submit_manual and m_name:
                 success = insert_pantry_item(user['user_id'], m_name, m_qty, m_cat, m_life)
@@ -323,7 +299,7 @@ else:
                 {k: v for k, v in item.items() if k != 'item_id'}
                 for item in active_items
             ]
-            st.dataframe(display_items, width='stretch')
+            st.dataframe(display_items, use_container_width=True)
             
             with st.expander("🛠️ Manage Ingredients Ledger"):
                 tab_edit, tab_delete, tab_delete_all = st.tabs(["📝 Edit Ingredient", "🗑️ Delete Single", "🚨 Delete All"])
@@ -374,22 +350,22 @@ else:
         st.header("🧠 AI Recipe Synthesis Hub")
         st.write(f"Processes your live PostgreSQL rows through Gemini, adhering to your profile: **{user['dietary_preference']}**.")
         
-        if st.button("Generate Personalized Waste-Free Recipe", width='stretch', type="primary"):
+        if st.button("Generate Personalized Waste-Free Recipe", type="primary", use_container_width=True):
             with st.spinner("Analyzing inventory deadlines... Formulating meal profiles..."):
                 ai_report_output = generate_waste_free_recipe(user['user_id'])
                 st.session_state.ai_recipe = ai_report_output
                 
-                if "frittata" in ai_report_output.lower() or "rice" in ai_report_output.lower():
-                    new_val = st.session_state.consumed_calories + 950.0
-                    st.session_state.consumed_calories = new_val
-                    
-                    recipe_title = "AI Recipe"
+                # Check for standard response markers to fire automated workout calculation logging strings
+                if "frittata" in ai_report_output.lower() or "rice" in ai_report_output.lower() or "recipe" in ai_report_output.lower():
+                    recipe_title = "AI Recipe Generation"
                     for line in ai_report_output.split('\n'):
                         clean_line = line.strip()
                         if clean_line.startswith("## ") or clean_line.startswith("🍳 ") or clean_line.startswith("# "):
                             recipe_title = clean_line.strip("# 🍳 ")
                             break
-                    update_calories_for_today(user['user_id'], new_val, food_item=recipe_title)
+                    
+                    # Call correct tracking entry function link mapping straight to the relational warehouse 
+                    add_meal_log(user['user_id'], 950.0, f"Generated Recipe: {recipe_title}")
                     st.toast("🔥 Logged estimated recipe nutrition counts into your Gym Dashboard tracker panel!")
                     st.rerun()
         
