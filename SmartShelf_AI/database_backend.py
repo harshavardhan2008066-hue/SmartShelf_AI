@@ -89,7 +89,11 @@ def get_connection():
     """Establishes and returns a secure pipeline connection to PostgreSQL."""
     global _schema_verified
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            conn = psycopg2.connect(db_url)
+        else:
+            conn = psycopg2.connect(**DB_CONFIG)
         if conn and not _schema_verified:
             _schema_verified = True
             verify_or_initialize_schema(conn)
